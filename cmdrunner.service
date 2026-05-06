@@ -1,0 +1,14 @@
+[Unit]
+Description=Git Relay cmd_runner
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/Lyudmula
+ExecStart=/usr/bin/python3 /root/Lyudmula/cmd_runner.py
+Restart=always
+RestartSec=10
+EnvironmentFile=-/root/Lyudmula/.env
+
+[Install]
+WantedBy=multi-user.target
