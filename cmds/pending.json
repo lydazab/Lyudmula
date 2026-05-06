@@ -1,1 +1,1 @@
-{"id":"init","cmd":"echo ready"}
+{"id":"hello-test-1","cmd":"echo ready && hostname && uptime"}
