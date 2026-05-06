@@ -1,11 +1,11 @@
 [Unit]
-Description=Telegram Bot on Claude
+Description=Telegram Agent Bot on Claude
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/root/Lyudmula
-ExecStart=/root/Lyudmula/venv/bin/python /root/Lyudmula/bot.py
+ExecStart=/root/Lyudmula/venv/bin/python /root/Lyudmula/agent_bot.py
 Restart=always
 RestartSec=5
 
