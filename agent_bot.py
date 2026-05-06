@@ -1,4 +1,4 @@
-import os, json, logging, math, httpx
+import os, json, logging, math, httpx, re, base64
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -9,8 +9,11 @@ for v in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy","ALL_PROXY","all
 from dotenv import load_dotenv
 import anthropic
 from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardRemove
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ConversationHandler, filters, ContextTypes,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -186,8 +189,17 @@ async def run_agent(uid: int, messages: list) -> str:
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привіт! Я бізнес-асистент на Claude.\n\n"
-        "Вмію:\n🔢 Рахувати\n📝 Зберігати нотатки\n🌐 Читати сайти\n📅 Казати дату і час\n\n"
-        "Команди: /notes /reset"
+        "Вмію:\n"
+        "🔢 Рахувати\n"
+        "📝 Зберігати нотатки\n"
+        "🌐 Читати сайти\n"
+        "📅 Казати дату і час\n"
+        "👔 Аналізувати LinkedIn профілі\n"
+        "🖼 Аналізувати фото\n\n"
+        "Команди:\n"
+        "/linkedin — аналіз кандидата\n"
+        "/notes — мої нотатки\n"
+        "/reset — очистити історію"
     )
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -211,6 +223,119 @@ async def chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.exception("error")
         await update.message.reply_text("Помилка. Спробуй ще раз.")
 
+# ── LinkedIn analyzer ────────────────────────────────────────────────────────
+LI_WAIT_DESC, LI_WAIT_PROFILE = range(10, 12)
+li_sessions: dict[int, dict] = {}
+
+LI_PROMPT = """Ти — HR-аналітик. Проаналізуй LinkedIn профіль кандидата на відповідність вакансії.
+
+ВАКАНСІЯ / КРИТЕРІЇ:
+{description}
+
+ПРОФІЛЬ КАНДИДАТА:
+{profile}
+
+Дай структурований аналіз:
+
+🎯 ВІДПОВІДНІСТЬ: X/10
+
+✅ СИЛЬНІ СТОРОНИ:
+• (що збігається з вакансією)
+
+❌ ЧОГО НЕ ВИСТАЧАЄ:
+• (що відсутнє або не відповідає)
+
+📋 ДОСВІД:
+• (ключові посади і роки)
+
+🛠 НАВИЧКИ:
+• (релевантні навички)
+
+💬 ВИСНОВОК:
+(2-3 речення — запрошувати на співбесіду чи ні і чому)"""
+
+def _fetch_linkedin(url: str) -> str:
+    try:
+        r = httpx.get(url, timeout=15, follow_redirects=True, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
+        })
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script","style","nav","footer","header","aside"]):
+            tag.decompose()
+        text = " ".join(soup.get_text(separator="\n").split())
+        if len(text) < 300 or "join linkedin" in text.lower():
+            return ""
+        return text[:5000]
+    except Exception:
+        return ""
+
+async def li_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    li_sessions[update.effective_user.id] = {}
+    await update.message.reply_text(
+        "📋 *Аналіз LinkedIn профілю*\n\n"
+        "Крок 1/2 — Надішли опис вакансії або критерії відбору.\n\n"
+        "_Наприклад: «Python-розробник 3+ роки, Django, PostgreSQL, англійська»_\n\n"
+        "/cancel — скасувати",
+        parse_mode="Markdown",
+    )
+    return LI_WAIT_DESC
+
+async def li_got_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    li_sessions[update.effective_user.id]["description"] = update.message.text
+    await update.message.reply_text(
+        "✅ Вакансію збережено.\n\n"
+        "Крок 2/2 — Надішли профіль кандидата:\n\n"
+        "🔗 *URL* (linkedin.com/in/...)\n"
+        "📝 *або текст* — скопіюй зі сторінки LinkedIn і встав сюди\n\n"
+        "Можна аналізувати кількох кандидатів підряд — просто надсилай наступний профіль.",
+        parse_mode="Markdown",
+    )
+    return LI_WAIT_PROFILE
+
+async def li_got_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    description = li_sessions.get(uid, {}).get("description", "")
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text("⏳ Аналізую...")
+
+    if re.match(r"https?://(www\.)?linkedin\.com/in/", text):
+        profile_text = _fetch_linkedin(text)
+        if not profile_text:
+            await update.message.reply_text(
+                "⚠️ LinkedIn заблокував автозавантаження.\n\n"
+                "Відкрий профіль у браузері → Ctrl+A → скопіюй текст → надішли мені."
+            )
+            return LI_WAIT_PROFILE
+    else:
+        profile_text = text
+
+    if len(profile_text) < 80:
+        await update.message.reply_text("❌ Замало тексту. Скопіюй більше інформації з профілю.")
+        return LI_WAIT_PROFILE
+
+    try:
+        resp = claude.messages.create(
+            model="claude-opus-4-7", max_tokens=1500,
+            messages=[{"role": "user", "content": LI_PROMPT.format(
+                description=description, profile=profile_text
+            )}],
+        )
+        await update.message.reply_text(resp.content[0].text)
+        await update.message.reply_text("Надішли наступний профіль або /cancel щоб завершити.")
+        return LI_WAIT_PROFILE
+    except Exception:
+        log.exception("li analyze error")
+        await update.message.reply_text("Помилка аналізу. Спробуй ще раз.")
+        return LI_WAIT_PROFILE
+
+async def li_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    li_sessions.pop(update.effective_user.id, None)
+    await update.message.reply_text("Аналіз завершено.", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+# ── Photo handler ─────────────────────────────────────────────────────────────
 async def photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -237,6 +362,17 @@ async def photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     log.info("Agent bot started with tools")
     app = ApplicationBuilder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+
+    li_conv = ConversationHandler(
+        entry_points=[CommandHandler("linkedin", li_start)],
+        states={
+            LI_WAIT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, li_got_desc)],
+            LI_WAIT_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, li_got_profile)],
+        },
+        fallbacks=[CommandHandler("cancel", li_cancel)],
+    )
+
+    app.add_handler(li_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("notes", notes_cmd))
