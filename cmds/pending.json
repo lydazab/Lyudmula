@@ -1,1 +1,1 @@
-{"id":"check-paths-1","cmd":"ls /home/bot/ 2>/dev/null || echo 'no /home/bot'; ls /root/Lyudmula/"}
+{"id":"deploy-agent-1","cmd":"cd /root/Lyudmula && git pull && ./venv/bin/pip install -q httpx beautifulsoup4 && cp mybot.service /etc/systemd/system/ && systemctl daemon-reload && systemctl restart mybot.service && sleep 3 && systemctl status mybot.service --no-pager | head -15"}
