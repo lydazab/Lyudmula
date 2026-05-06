@@ -1,1 +1,1 @@
-{"id":"hello-test-1","cmd":"echo ready && hostname && uptime"}
+{"id":"check-paths-1","cmd":"ls /home/bot/ 2>/dev/null || echo 'no /home/bot'; ls /root/Lyudmula/"}
