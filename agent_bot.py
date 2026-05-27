@@ -24,9 +24,13 @@ history: dict[int, list[dict]] = {}
 NOTES_DIR = Path(__file__).parent / "notes"
 NOTES_DIR.mkdir(exist_ok=True)
 
+GOOGLE_CREDS_PATH = Path(__file__).parent / "google_credentials.json"
+CALENDAR_ID = "lydazab@gmail.com"
+
 SYSTEM_PROMPT = """Ти — бізнес-асистент. Відповідаєш українською, коротко і по суті.
-Маєш інструменти: calculate, save_note, list_notes, delete_note, get_datetime, read_url.
-Використовуй їх коли потрібно — без зайвих пояснень."""
+Маєш інструменти: calculate, save_note, list_notes, delete_note, get_datetime, read_url, create_calendar_event, list_calendar_events.
+Використовуй їх коли потрібно — без зайвих пояснень.
+Поточна дата і часовий пояс: Київ (UTC+3). При створенні подій форматуй datetime як ISO 8601 з урахуванням київського часу."""
 
 TOOLS = [
     {
@@ -68,6 +72,30 @@ TOOLS = [
         "name": "get_datetime",
         "description": "Повертає поточну дату і час українською мовою.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_calendar_event",
+        "description": "Створює подію в Google Calendar користувача.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Назва події"},
+                "start": {"type": "string", "description": "Початок у форматі ISO 8601, наприклад 2026-05-29T18:30:00"},
+                "end": {"type": "string", "description": "Кінець у форматі ISO 8601. Якщо не вказано — +1 година від початку"},
+                "description": {"type": "string", "description": "Опис або нотатки до події"},
+            },
+            "required": ["summary", "start"],
+        },
+    },
+    {
+        "name": "list_calendar_events",
+        "description": "Показує найближчі події з Google Calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "На скільки днів вперед дивитись (за замовчуванням 7)"},
+            },
+        },
     },
     {
         "name": "read_url",
@@ -131,6 +159,62 @@ def tool_get_datetime() -> str:
     return (f"{DAYS_UA[now.weekday()]}, {now.day} {MONTHS_UA[now.month-1]} {now.year} р., "
             f"{now.strftime('%H:%M')} (Київ)")
 
+def _get_calendar_service():
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    creds = service_account.Credentials.from_service_account_file(
+        str(GOOGLE_CREDS_PATH),
+        scopes=["https://www.googleapis.com/auth/calendar"],
+    )
+    return build("calendar", "v3", credentials=creds)
+
+def tool_create_calendar_event(summary: str, start: str, end: str = "", description: str = "") -> str:
+    try:
+        service = _get_calendar_service()
+        if not end:
+            from datetime import timedelta
+            dt = datetime.fromisoformat(start)
+            end = (dt + timedelta(hours=1)).isoformat()
+        event = {
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start, "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": end, "timeZone": "Europe/Kyiv"},
+        }
+        result = service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+        return f"✅ Подію «{summary}» створено на {start[:16].replace('T', ' о ')}."
+    except Exception as e:
+        return f"Помилка створення події: {e}"
+
+def tool_list_calendar_events(days: int = 7) -> str:
+    try:
+        from datetime import timedelta
+        service = _get_calendar_service()
+        now = datetime.now(ZoneInfo("Europe/Kyiv"))
+        time_min = now.isoformat()
+        time_max = (now + timedelta(days=days)).isoformat()
+        result = service.events().list(
+            calendarId=CALENDAR_ID,
+            timeMin=time_min, timeMax=time_max,
+            singleEvents=True, orderBy="startTime", maxResults=10,
+        ).execute()
+        events = result.get("items", [])
+        if not events:
+            return f"Найближчі {days} днів — подій немає."
+        lines = [f"📅 Найближчі події ({days} днів):"]
+        for e in events:
+            start_raw = e["start"].get("dateTime", e["start"].get("date", ""))
+            title = e.get("summary", "Без назви")
+            if "T" in start_raw:
+                dt = datetime.fromisoformat(start_raw)
+                start_fmt = dt.strftime("%d.%m %H:%M")
+            else:
+                start_fmt = start_raw
+            lines.append(f"• {start_fmt} — {title}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Помилка читання календаря: {e}"
+
 def tool_read_url(url: str) -> str:
     try:
         r = httpx.get(url, timeout=15, follow_redirects=True,
@@ -156,6 +240,10 @@ def run_tool(uid: int, name: str, inp: dict) -> str:
         return tool_get_datetime()
     if name == "read_url":
         return tool_read_url(inp["url"])
+    if name == "create_calendar_event":
+        return tool_create_calendar_event(inp["summary"], inp["start"], inp.get("end",""), inp.get("description",""))
+    if name == "list_calendar_events":
+        return tool_list_calendar_events(inp.get("days", 7))
     return "Невідомий інструмент."
 
 async def run_agent(uid: int, messages: list) -> str:
