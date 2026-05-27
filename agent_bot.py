@@ -188,18 +188,16 @@ async def run_agent(uid: int, messages: list) -> str:
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привіт! Я бізнес-асистент на Claude.\n\n"
-        "Вмію:\n"
-        "🔢 Рахувати\n"
-        "📝 Зберігати нотатки\n"
-        "🌐 Читати сайти\n"
-        "📅 Казати дату і час\n"
-        "👔 Аналізувати LinkedIn профілі\n"
-        "🖼 Аналізувати фото\n\n"
-        "Команди:\n"
-        "/linkedin — аналіз кандидата\n"
+        "Привіт! Я HR-асистент на Claude.\n\n"
+        "👔 *Робота з кандидатами:*\n"
+        "/linkedin — аналіз профілю\n"
+        "/reject — лист відмови\n"
+        "/invite — запрошення на співбесіду\n\n"
+        "🛠 *Інше:*\n"
         "/notes — мої нотатки\n"
-        "/reset — очистити історію"
+        "/reset — очистити історію\n\n"
+        "Або просто пиши — я відповім 🙂",
+        parse_mode="Markdown",
     )
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -225,6 +223,9 @@ async def chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── LinkedIn analyzer ────────────────────────────────────────────────────────
 LI_WAIT_DESC, LI_WAIT_PROFILE = range(10, 12)
+REJ_WAIT_INFO, REJ_WAIT_REASON = range(20, 22)
+INV_WAIT_INFO, INV_WAIT_SLOTS = range(30, 32)
+hr_sessions: dict[int, dict] = {}
 li_sessions: dict[int, dict] = {}
 
 LI_PROMPT = """Ти — HR-аналітик. Проаналізуй LinkedIn профіль кандидата на відповідність вакансії.
@@ -335,6 +336,139 @@ async def li_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Аналіз завершено.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# ── Reject handler ────────────────────────────────────────────────────────────
+REJECT_PROMPT = """Ти — досвідчений HR-рекрутер. Напиши персоналізований лист-відмову кандидату.
+
+Кандидат: {name}
+Вакансія: {position}
+Причина відмови (для внутрішнього використання): {reason}
+
+Вимоги до листа:
+- Тепло і з повагою, без канцеляризмів
+- Подякуй за час і інтерес
+- НЕ вказуй конкретну причину відмови — лише м'яко повідом що обрали іншого
+- Залиш двері відкритими для майбутніх вакансій
+- Довжина: 5-7 речень
+- Мова: українська
+- Формат: готовий до відправки лист (без теми листа)"""
+
+INVITE_PROMPT = """Ти — досвідчений HR-рекрутер. Напиши персоналізоване запрошення на співбесіду.
+
+Кандидат: {name}
+Вакансія: {position}
+Доступні слоти для співбесіди: {slots}
+
+Вимоги до листа:
+- Енергійно і привітно
+- Подякуй за резюме/профіль
+- Запропонуй обрати зручний слот із наданих
+- Вкажи що співбесіда займе ~1 годину
+- Попроси підтвердити вибір часу
+- Довжина: 6-8 речень
+- Мова: українська
+- Формат: готовий до відправки лист"""
+
+async def rej_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    hr_sessions[update.effective_user.id] = {"type": "reject"}
+    await update.message.reply_text(
+        "✉️ *Лист відмови*\n\n"
+        "Крок 1/2 — Напиши ім'я кандидата і вакансію.\n\n"
+        "_Наприклад: «Іван Петренко, вакансія Python-розробник»_\n\n"
+        "/cancel — скасувати",
+        parse_mode="Markdown",
+    )
+    return REJ_WAIT_INFO
+
+async def rej_got_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    hr_sessions[update.effective_user.id]["info"] = update.message.text
+    await update.message.reply_text(
+        "Крок 2/2 — Чому не підійшов кандидат?\n\n"
+        "_Це тільки для мене, у лист не потрапить.\n"
+        "Наприклад: «Мало досвіду», «Не влаштували зарплатні очікування», «Обрали сильнішого кандидата»_",
+        parse_mode="Markdown",
+    )
+    return REJ_WAIT_REASON
+
+async def rej_got_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    info = hr_sessions.get(uid, {}).get("info", "")
+    reason = update.message.text
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text("⏳ Готую лист...")
+    try:
+        parts = info.split(",", 1)
+        name = parts[0].strip() if parts else info
+        position = parts[1].strip() if len(parts) > 1 else "вакансія"
+        resp = claude.messages.create(
+            model="claude-opus-4-7", max_tokens=800,
+            messages=[{"role": "user", "content": REJECT_PROMPT.format(
+                name=name, position=position, reason=reason
+            )}],
+        )
+        await update.message.reply_text("📩 Готовий лист:\n\n" + resp.content[0].text)
+        await update.message.reply_text(
+            "Можеш скопіювати і відправити кандидату.\n"
+            "Ще один? Напиши /reject або /cancel щоб завершити."
+        )
+    except Exception:
+        log.exception("reject error")
+        await update.message.reply_text("Помилка. Спробуй ще раз.")
+    hr_sessions.pop(uid, None)
+    return ConversationHandler.END
+
+# ── Invite handler ─────────────────────────────────────────────────────────────
+async def inv_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    hr_sessions[update.effective_user.id] = {"type": "invite"}
+    await update.message.reply_text(
+        "📅 *Запрошення на співбесіду*\n\n"
+        "Крок 1/2 — Напиши ім'я кандидата і вакансію.\n\n"
+        "_Наприклад: «Марія Коваленко, вакансія маркетолог»_\n\n"
+        "/cancel — скасувати",
+        parse_mode="Markdown",
+    )
+    return INV_WAIT_INFO
+
+async def inv_got_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    hr_sessions[update.effective_user.id]["info"] = update.message.text
+    await update.message.reply_text(
+        "Крок 2/2 — Напиши доступні слоти для зустрічі.\n\n"
+        "_Наприклад: «Вівторок 10:00, середа 14:00 або 16:00, п'ятниця 11:00»_",
+        parse_mode="Markdown",
+    )
+    return INV_WAIT_SLOTS
+
+async def inv_got_slots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    info = hr_sessions.get(uid, {}).get("info", "")
+    slots = update.message.text
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text("⏳ Готую запрошення...")
+    try:
+        parts = info.split(",", 1)
+        name = parts[0].strip() if parts else info
+        position = parts[1].strip() if len(parts) > 1 else "вакансія"
+        resp = claude.messages.create(
+            model="claude-opus-4-7", max_tokens=800,
+            messages=[{"role": "user", "content": INVITE_PROMPT.format(
+                name=name, position=position, slots=slots
+            )}],
+        )
+        await update.message.reply_text("📩 Готове запрошення:\n\n" + resp.content[0].text)
+        await update.message.reply_text(
+            "Можеш скопіювати і відправити кандидату.\n"
+            "Ще одне? Напиши /invite або /cancel щоб завершити."
+        )
+    except Exception:
+        log.exception("invite error")
+        await update.message.reply_text("Помилка. Спробуй ще раз.")
+    hr_sessions.pop(uid, None)
+    return ConversationHandler.END
+
+async def hr_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    hr_sessions.pop(update.effective_user.id, None)
+    await update.message.reply_text("Скасовано.", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
 # ── Photo handler ─────────────────────────────────────────────────────────────
 async def photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -372,7 +506,27 @@ def main():
         fallbacks=[CommandHandler("cancel", li_cancel)],
     )
 
+    rej_conv = ConversationHandler(
+        entry_points=[CommandHandler("reject", rej_start)],
+        states={
+            REJ_WAIT_INFO: [MessageHandler(filters.TEXT & ~filters.COMMAND, rej_got_info)],
+            REJ_WAIT_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, rej_got_reason)],
+        },
+        fallbacks=[CommandHandler("cancel", hr_cancel)],
+    )
+
+    inv_conv = ConversationHandler(
+        entry_points=[CommandHandler("invite", inv_start)],
+        states={
+            INV_WAIT_INFO: [MessageHandler(filters.TEXT & ~filters.COMMAND, inv_got_info)],
+            INV_WAIT_SLOTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, inv_got_slots)],
+        },
+        fallbacks=[CommandHandler("cancel", hr_cancel)],
+    )
+
     app.add_handler(li_conv)
+    app.add_handler(rej_conv)
+    app.add_handler(inv_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("notes", notes_cmd))
