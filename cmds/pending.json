@@ -1,1 +1,1 @@
-{"id":"deploy-linkedin-1","cmd":"cd /root/Lyudmula && git pull && systemctl restart mybot.service && sleep 3 && journalctl -u mybot.service -n 5 --no-pager"}
+{"id":"deploy-hr-1","cmd":"cd /root/Lyudmula && git pull && systemctl restart mybot.service && sleep 3 && journalctl -u mybot.service -n 4 --no-pager"}
